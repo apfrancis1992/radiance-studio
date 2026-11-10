@@ -54,6 +54,13 @@ services:
       # Only used when UPSTREAM_URL names a host. 127.0.0.11 is Docker's resolver inside a network;
       # on the host network, use the host's own resolver (127.0.0.53 under systemd-resolved).
       RESOLVER: ${RESOLVER:-127.0.0.11}
+      # The llama-swaps a browser may choose instead of this one, as JSON. It is both the allow-list
+      # for the page's Settings -> "llama-swap to use" and what that dropdown offers, so nothing can
+      # be picked that is not allowed. Empty (here) means the choice does not exist. Each entry is
+      # {"label": what the page offers, "url": scheme://host[:port] with no path}:
+      #   UPSTREAM_OPTIONS=[{"label":"this host","url":"http://127.0.0.1:8080"},
+      #                     {"label":"lab box","url":"http://192.168.1.20:8080"}]
+      UPSTREAM_OPTIONS: ${UPSTREAM_OPTIONS:-[]}
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:${PORT:-8090}/healthz"]
       interval: 30s

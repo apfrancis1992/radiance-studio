@@ -8,8 +8,9 @@
 ARG NGINX_IMAGE=docker.io/nginx:alpine
 FROM ${NGINX_IMAGE}
 
-# Every ${VAR} the template uses. A Komodo stack or `docker run -e` overrides any of them; the
-# entrypoint substitutes them all, so none may be left undefined.
+# Every ${VAR} the config and the page use. A Komodo stack or `docker run -e` overrides any of them;
+# the entrypoint substitutes them all, so none may be left undefined -- that is what the ENV block
+# is for as much as for defaults, and scripts/check-stack.sh is what keeps it complete.
 ENV PORT=8090 \
     UPSTREAM_URL=http://127.0.0.1:8080 \
     UPSTREAM_API_KEY= \
@@ -19,10 +20,13 @@ ENV PORT=8090 \
     MAX_DURATION=360 \
     DEFAULT_DURATION=30 \
     REQ_TIMEOUT=1800 \
-    RESOLVER=127.0.0.11
+    RESOLVER=127.0.0.11 \
+    UPSTREAM_OPTIONS=[]
 
 COPY nginx/default.conf.template /etc/nginx/templates/default.conf.template
+COPY docker/10-upstream-map.sh /docker-entrypoint.d/10-upstream-map.sh
 COPY public/ /usr/share/nginx/html/
+RUN chmod +x /docker-entrypoint.d/10-upstream-map.sh
 
 # Not EXPOSEd: the stack shares the host's network, as radiance's own containers do, and the port
 # is whatever PORT says at run time.
@@ -37,6 +41,10 @@ LABEL org.opencontainers.image.title="radiance-studio" \
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.source=${IMAGE_SOURCE} \
       org.opencontainers.image.revision=${GIT_SHA}
+
+# In the container as well as in the labels, because /config.json hands it to the page: the footer
+# says which build you are looking at, which is the first question when a take looks wrong.
+ENV VERSION=${GIT_SHA}
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD wget -q -O /dev/null "http://127.0.0.1:${PORT}/healthz" || exit 1

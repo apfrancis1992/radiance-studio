@@ -7,12 +7,16 @@
 #
 #   1. deploy/stack.yml interpolates ${VAR}s, and nginx/default.conf.template has its own. One that
 #      the image's ENV block does not define arrives at the container empty -- which for UPSTREAM_URL
-#      is a proxy that answers 502, and for PORT a healthcheck that misses a running container.
+#      is a proxy that answers 502, and for PORT a healthcheck that misses a running container. The
+#      other direction matters too: a variable the image defines that the stack never names is a
+#      setting with no way to set it from Komodo.
 #   2. scripts/publish.sh --compose must resolve to a pinned image line. That output is what gets
 #      pasted into Komodo, and a tag left as "latest" there means whatever was pushed last rather
 #      than what you just built.
 #   3. The healthcheck has to survive the substitution: Komodo reads it, and a stack without one
 #      calls a container that never started healthy.
+#   4. The page reads fields out of /config.json. If the template stops returning one, the setting
+#      silently falls back instead of failing, so the pair is checked together.
 #
 # Needs git, for --compose. The nginx syntax test of the rendered template is CI's job -- it wants
 # the image's own nginx and its /etc/nginx/conf.d layout, not whatever is on this machine.
@@ -47,6 +51,36 @@ for v in $(vars_in nginx/default.conf.template); do
   else no "the template uses \${$v} and the image does not define it -- envsubst leaves it empty"
   fi
 done
+
+# The other direction. VERSION is the build's own (it comes from the commit), so the stack has no
+# business setting it; everything else the image defines should be nameable in the stack you paste.
+for v in $(sh scripts/template-vars.sh | tr ' ' '\n' | tr -d '$'); do
+  [ "$v" = VERSION ] && continue
+  # Fixed-string, because "does the stack name ${VAR" is the whole question: what follows -- `:-` a
+  # default, or nothing at all -- is compose's business. A bracket expression asking the same thing
+  # reads differently to busybox grep than to GNU's, which is how this check once failed only in CI.
+  if grep -qF "\${$v" deploy/stack.yml; then ok "$v can be set from the stack"
+  else no "$v is defined by the image but deploy/stack.yml never names it -- no way to set it in Komodo"
+  fi
+done
+
+# /config.json is the only way the container's settings reach the page; each field the page reads is
+# checked here rather than relying on the page's fallback, which fails silently.
+for field in model title stream maxDuration defaultDuration requestTimeout upstream upstreamOptions version; do
+  if grep -q "\\\"$field\\\":" nginx/default.conf.template; then ok "/config.json carries $field"
+  else no "/config.json does not carry $field, which the page asks for"
+  fi
+done
+
+# The X-Upstream allow-list is generated at start, so the image has to carry the generator and run it
+# -- /docker-entrypoint.d only executes files that are executable.
+if [ -f docker/10-upstream-map.sh ] && sh -n docker/10-upstream-map.sh \
+   && grep -q 'COPY docker/10-upstream-map.sh /docker-entrypoint.d/' Dockerfile \
+   && grep -q 'chmod +x /docker-entrypoint.d/10-upstream-map.sh' Dockerfile; then
+  ok 'the X-Upstream allow-list is generated at container start, and the image makes it runnable'
+else
+  no 'docker/10-upstream-map.sh is missing, unparsable, or not copied-and-chmodded by the Dockerfile'
+fi
 
 pinned=$(sh scripts/publish.sh --compose)
 if printf '%s\n' "$pinned" | grep -Eq '^[[:space:]]*image:[[:space:]]*[^[:space:]]+:[0-9a-f]{7}$'; then

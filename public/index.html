@@ -20,6 +20,7 @@
     <select id="model"></select>
   </label>
   <button id="unload" class="ghost" title="Ask llama-swap to unload every model and give the cards back">unload</button>
+  <button id="settings" class="ghost" title="Defaults this browser uses, and which llama-swap to reach">settings</button>
   <span id="status" class="pill" title="llama-swap"><i></i><span id="statusText">checking</span></span>
 </header>
 
@@ -55,8 +56,10 @@ Softly the world begins to breathe"></textarea>
           <label>genre<input id="genre" list="genreList" placeholder="acoustic pop"></label>
           <label class="narrow">BPM<input id="bpm" type="number" min="40" max="220" step="1" placeholder="96"></label>
           <label>mood<input id="mood" placeholder="warm and intimate"></label>
+          <label>key<input id="songKey" list="keyList" placeholder="B minor"></label>
           <label>vocals<input id="vocals" list="vocalList" placeholder="soft female lead"></label>
-          <label>instruments<input id="instruments" placeholder="nylon guitar, brushed drums"></label>
+          <label class="narrow">time<input id="timeSig" list="timeList" placeholder="4/4"></label>
+          <label class="wide">instruments<input id="instruments" placeholder="nylon guitar, brushed drums"></label>
         </div>
         <datalist id="genreList">
           <option>acoustic pop</option><option>indie folk</option><option>dream pop</option>
@@ -67,6 +70,13 @@ Softly the world begins to breathe"></textarea>
         <datalist id="vocalList">
           <option>soft female lead</option><option>husky male lead</option><option>choir</option>
           <option>duet, male and female</option><option>rap</option><option>instrumental, no vocals</option>
+        </datalist>
+        <datalist id="keyList">
+          <option>C major</option><option>G major</option><option>D major</option><option>A minor</option>
+          <option>E minor</option><option>B minor</option><option>F# minor</option><option>Bb major</option>
+        </datalist>
+        <datalist id="timeList">
+          <option>4/4</option><option>3/4</option><option>6/8</option><option>12/8</option><option>5/4</option>
         </datalist>
         <textarea id="instructions" rows="2" spellcheck="false" readonly></textarea>
         <p class="hint" id="instHint">Sent as <code>instructions</code>. The model reads it as plain text:
@@ -82,13 +92,14 @@ Softly the world begins to breathe"></textarea>
         <div class="len-row">
           <input type="range" id="durationRange" min="5" max="360" step="5" value="30">
           <output id="durationOut" for="durationRange">30 s</output>
+          <span class="frames" id="framesOut">750 frames</span>
         </div>
         <p class="hint">A song is made at about the speed it plays, so the wait is roughly the length.
-          Six minutes is the model's ceiling.</p>
+          Six minutes is the model's ceiling: 9000 frames, 25 a second.</p>
       </div>
 
       <details class="field adv">
-        <summary>Takes</summary>
+        <summary>Takes and transport</summary>
         <div class="adv-grid">
           <label>seed
             <span class="seed-row">
@@ -99,11 +110,22 @@ Softly the world begins to breathe"></textarea>
           <label>denoiser steps<input id="steps" type="number" min="1" max="1000" step="1" value="30"></label>
           <label>guidance<input id="guidance" type="number" min="1" max="30" step="0.1" value="1.7"></label>
         </div>
-        <label class="check"><input type="checkbox" id="stream">
-          <span>Play each window as it is made instead of waiting for the whole song</span></label>
+        <fieldset class="transport">
+          <legend>how the song comes back</legend>
+          <label class="check"><input type="radio" name="transport" id="transportSse" value="sse" checked>
+            <span>as windows (<code>stream: true</code>) — each 4 s plays while the rest is still being made</span></label>
+          <label class="check"><input type="radio" name="transport" id="transportAudio" value="audio">
+            <span>as raw bytes (<code>stream_format: audio</code>) — counts up as they land, plays at the end</span></label>
+          <label class="check"><input type="radio" name="transport" id="transportWhole" value="whole">
+            <span>as one wav at the end — nothing arrives until the song is finished</span></label>
+        </fieldset>
+        <label class="check"><input type="checkbox" id="byFrames">
+          <span>Ask in frames (<code>max_new_tokens</code>, 25 a second) instead of <code>duration</code></span></label>
         <p class="hint">The same seed, words and length give the same song again on the same deployment,
           so a take you liked is reproducible. Steps and guidance are the denoiser's; the defaults are
-          what the model ships with.</p>
+          what the model ships with. Those are every field radiance honours on this route — the rest of
+          OpenAI's speech request (<code>voice</code>, <code>speed</code>, <code>user</code>) it accepts
+          and ignores, and <code>references</code> is a voice-cloning model's.</p>
       </details>
 
       <div class="actions">
@@ -144,6 +166,33 @@ Softly the world begins to breathe"></textarea>
       seed and the words that made them.</p>
   </section>
 </main>
+
+<dialog id="settingsDialog" aria-labelledby="settings-h">
+  <form method="dialog">
+    <div class="pane-head">
+      <h2 id="settings-h">Settings</h2>
+      <button id="settingsReset" class="link" type="button">reset to the deployed ones</button>
+    </div>
+    <p class="hint">What the container was deployed with, and what this browser chose instead of it.
+      Saved here, in this browser only — a fresh browser gets the deployed values, and a redeploy
+      changes the starting point for anything you never touched.</p>
+    <div class="set-grid">
+      <label>model to preselect<input id="sModel" type="text" spellcheck="false" placeholder="minimax-music3"></label>
+      <label>title<input id="sTitle" type="text" maxlength="60"></label>
+      <label>longest song offered (s)<input id="sMaxDuration" type="number" min="5" max="360" step="5"></label>
+      <label>length to start with (s)<input id="sDefaultDuration" type="number" min="5" max="360" step="5"></label>
+      <label>wait for a byte (s)<input id="sTimeout" type="number" min="10" max="7200" step="10"></label>
+      <label>llama-swap to use<select id="sUpstream"></select></label>
+    </div>
+    <label class="check"><input type="checkbox" id="sStream">
+      <span>play each window as it is made, rather than waiting for the whole song</span></label>
+    <p class="hint" id="sNote"></p>
+    <div class="now-actions">
+      <button class="primary" value="done" type="submit">Done</button>
+      <span class="hint" id="sHint">Nothing here sends anything anywhere; it is what the next request says.</span>
+    </div>
+  </form>
+</dialog>
 
 <footer>
   <span>lyrics and instructions go to llama-swap's <code>/v1/audio/speech</code>, which hands them to

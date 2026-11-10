@@ -13,15 +13,22 @@
 # checkpoint takes minutes to load before a single byte of audio moves. `${REQ_TIMEOUT}` is that
 # wait, and it is why the page streams by default (the first window of a song arrives in seconds,
 # and each event keeps every idle timer in the path awake).
+#
+# A request may also carry `X-Upstream: http://host:port` to reach a different llama-swap for that
+# one request -- docker/10-upstream-map.sh builds the allow-list from UPSTREAM_OPTIONS. Anything not
+# on it is ignored, so the header cannot make this box fetch an arbitrary address with our key
+# attached to the request.
 
 server {
     listen ${PORT} default_server;
     listen [::]:${PORT} default_server;
     server_name _;
 
-    # Where the models are. No trailing slash needed; one is removed if given.
-    set $upstream "${UPSTREAM_URL}";
-    if ($upstream ~ ^(.+)/$) { set $upstream $1; }
+    # Where the models are: this deployment's llama-swap, unless the request named an allowed one.
+    # Three plain `set`s in sequence, which is the `if` form nginx is safe with.
+    set $upstream $upstream_from_header;
+    if ($upstream = "") { set $upstream "${UPSTREAM_URL}"; }
+    if ($upstream ~ ^(.+)/$) { set $upstream $1; }   # a trailing slash is removed if given
 
     # The key reaches llama-swap here, not in the page. With no key configured the header is
     # dropped rather than sent as an empty "Bearer ", which a keyed llama-swap would refuse.
@@ -57,11 +64,13 @@ server {
         return 200 "ok\n";
     }
 
-    # What the page reads at startup: the model to preselect, the title, and the limits to offer.
-    # Every value is quoted so an unexpected setting cannot break the JSON; the page coerces.
+    # What the page reads at startup: the model to preselect, the title, the limits to offer, and
+    # the llama-swaps it may be pointed at. Every value is quoted so an unexpected setting cannot
+    # break the JSON -- except upstreamOptions, which is a JSON array already. A malformed one shows
+    # up as the page falling back to its own defaults, which is what that fallback is for.
     location = /config.json {
         default_type application/json;
-        return 200 '{"model":"${MODEL}","title":"${APP_TITLE}","stream":"${STREAM_DEFAULT}","maxDuration":"${MAX_DURATION}","defaultDuration":"${DEFAULT_DURATION}","requestTimeout":"${REQ_TIMEOUT}"}';
+        return 200 '{"model":"${MODEL}","title":"${APP_TITLE}","stream":"${STREAM_DEFAULT}","maxDuration":"${MAX_DURATION}","defaultDuration":"${DEFAULT_DURATION}","requestTimeout":"${REQ_TIMEOUT}","upstream":"${UPSTREAM_URL}","upstreamOptions":${UPSTREAM_OPTIONS},"version":"${VERSION}"}';
     }
 
     # One block for everything that belongs to llama-swap: the OpenAI routes the page calls

@@ -9,6 +9,8 @@
  *   - play each window the moment it lands, one after the last, which is the whole point of
  *     streaming: the first window arrives in seconds and the song is finished about as fast as it
  *     plays, so a six minute song costs six minutes of waiting for the last bar, not for the first;
+ *   - take a `stream_format: audio` response as it arrives -- the same PCM, without base64, behind a
+ *     wav header that states no length because a stream's cannot know it yet;
  *   - write the same samples back out as a wav, for the download link and for the take's history.
  */
 
@@ -48,6 +50,35 @@ export function pcmToWav(parts, sampleRate, channels) {
   v.setUint16(34, 16, true);
   ascii(36, 'data'); v.setUint32(40, bytes, true);
   return new Blob([head, ...parts], { type: 'audio/wav' });
+}
+
+/** A response body, read to the end, with the running total handed to `onBytes` as each chunk
+ *  lands. That is all `stream_format: audio` needs on this side: the song arrives as bytes, and the
+ *  page counts them so the wait has a number in it. An abort propagates as AbortError. */
+export async function readChunks(body, onBytes = () => {}) {
+  const reader = body.getReader();
+  const parts = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value || !value.length) continue;
+    parts.push(value);
+    total += value.length;
+    onBytes(total);
+  }
+  const all = new Uint8Array(total);
+  let at = 0;
+  for (const p of parts) { all.set(p, at); at += p.length; }
+  return all;
+}
+
+/** Whether bytes open with a RIFF header. `stream_format: audio` with `response_format: wav` sends
+ *  exactly that, with both length fields at their maximum -- so the header is stripped and one that
+ *  knows the real size is written in its place, which is what makes the take seekable. */
+export function isWav(bytes) {
+  return bytes.length > 44 && bytes[0] === 0x52 && bytes[1] === 0x49
+    && bytes[2] === 0x46 && bytes[3] === 0x46;
 }
 
 /** The bytes of an SSE stream, one parsed `data:` object at a time. The events carry no `id:` and

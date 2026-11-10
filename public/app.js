@@ -2,50 +2,66 @@
  *
  * One request per song, to llama-swap's /v1/audio/speech with the model named in the body; the
  * container's nginx adds the key and does not buffer, so a streamed song reaches this page as
- * radiance writes it. Everything here is the form, the player, and the history -- see audio.js for
- * the wire format and store.js for where takes live afterwards.
+ * radiance writes it. Everything here is the form, the player, the history and the settings panel --
+ * see audio.js for the wire format, settings.js for the defaults, store.js for where takes live
+ * afterwards.
+ *
+ * The form covers every field radiance honours on that route (core/server/audio_gen.cpp): the words,
+ * the description, the length in seconds or frames, the seed, the denoiser's steps and guidance, and
+ * which of the three transports to answer with. `voice`, `speed` and `user` it accepts and ignores;
+ * `references` belongs to a voice-cloning model, and this one is not. See deploy/llama-swap.yaml for
+ * why `speed` is stripped rather than sent.
  */
 
 import * as store from './store.js';
-import { base64ToBytes, pcmToWav, sseEvents, Graph, WindowPlayer, Meter } from './audio.js';
+import * as settings from './settings.js';
+import {
+  base64ToBytes, pcmToWav, sseEvents, readChunks, isWav,
+  Graph, WindowPlayer, Meter,
+} from './audio.js';
 
 const el = (id) => document.getElementById(id);
 const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
 
-/* /config.json is the container's environment, quoted on every field, so nothing here can be
- * broken by a value that is not a number. */
+/* /config.json is the container's environment, quoted on every field so nothing here can be broken
+ * by a value that is not a number; settings.js merges in what this browser chose instead, which is
+ * what CONF holds. CONF is reassigned whenever a setting changes, so nothing downstream needs to
+ * know the difference between the deployment's value and the browser's. */
 const cfg = await fetch('config.json').then(r => (r.ok ? r.json() : {})).catch(() => ({}));
-const CONF = {
-  model: cfg.model || '',
-  title: cfg.title || 'radiance studio',
-  stream: cfg.stream !== 'false',
-  maxDuration: clamp(Number(cfg.maxDuration) || 360, 5, 360),
-  defaultDuration: 30,
-  requestTimeout: Number(cfg.requestTimeout) || 1800,
-};
-CONF.defaultDuration = clamp(Number(cfg.defaultDuration) || 30, 5, CONF.maxDuration);
+let CONF = settings.init(cfg);
+
+/* The three ways radiance can answer, as the form's radio group names them. All three end up as the
+ * same wav in the history; they differ in when the bytes arrive and whether they can be played from.
+ * `framesOf` is the model's own unit: 25 frames a second, 9000 of them. */
+const TRANSPORTS = { sse: 'windows', audio: 'raw bytes', whole: 'one wav' };
+const FRAMES_PER_SECOND = 25;
+const framesOf = (seconds) => clamp(Math.round(seconds * FRAMES_PER_SECOND), 1, settings.MODEL_MAX_SECONDS * FRAMES_PER_SECOND);
 
 /* ─────────────────────────────────────── the widgets ─────────────────────────────────────── */
 
 const ui = {
   model: el('model'), status: el('status'), statusText: el('statusText'), unload: el('unload'),
   form: el('form'), lyrics: el('lyrics'), lyricsCount: el('lyricsCount'), tags: el('tags'),
-  genre: el('genre'), bpm: el('bpm'), mood: el('mood'),
-  vocals: el('vocals'), instruments: el('instruments'), instructions: el('instructions'),
+  genre: el('genre'), bpm: el('bpm'), mood: el('mood'), songKey: el('songKey'),
+  vocals: el('vocals'), timeSig: el('timeSig'), instruments: el('instruments'),
+  instructions: el('instructions'),
   rawToggle: el('rawToggle'), instHint: el('instHint'),
-  durationRange: el('durationRange'), durationOut: el('durationOut'), noLength: el('noLength'),
+  durationRange: el('durationRange'), durationOut: el('durationOut'), framesOut: el('framesOut'),
+  noLength: el('noLength'),
   seed: el('seed'), dice: el('dice'), steps: el('steps'), guidance: el('guidance'),
-  stream: el('stream'),
+  transportSse: el('transportSse'), transportAudio: el('transportAudio'), transportWhole: el('transportWhole'),
+  byFrames: el('byFrames'),
   go: el('go'), stop: el('stop'), elapsed: el('elapsed'), statusLine: el('statusLine'),
   error: el('error'), example: el('example'),
   nowTitle: el('nowTitle'), nowMeta: el('nowMeta'), audio: el('audio'), download: el('download'),
   recall: el('recall'), reroll: el('reroll'), viz: el('viz'),
   takes: el('takes'), takesHint: el('takesHint'), clear: el('clear'), storage: el('storage'),
   title: el('title'), about: el('about'),
+  settings: el('settings'), settingsDialog: el('settingsDialog'), settingsReset: el('settingsReset'),
+  sModel: el('sModel'), sTitle: el('sTitle'), sMaxDuration: el('sMaxDuration'),
+  sDefaultDuration: el('sDefaultDuration'), sTimeout: el('sTimeout'), sUpstream: el('sUpstream'),
+  sStream: el('sStream'), sNote: el('sNote'), sHint: el('sHint'),
 };
-
-document.title = `${CONF.title} · MiniMax-Music3`;
-ui.title.textContent = CONF.title;
 
 const graph = new Graph();
 const meter = new meterOrNop();
@@ -76,15 +92,21 @@ function insertAtCaret(area, text) {
 }
 
 ui.lyrics.addEventListener('input', sync);
-for (const input of [ui.genre, ui.bpm, ui.mood, ui.vocals, ui.instruments]) input.addEventListener('input', sync);
+for (const input of [ui.genre, ui.bpm, ui.mood, ui.songKey, ui.vocals, ui.timeSig, ui.instruments]) {
+  input.addEventListener('input', sync);
+}
 
-/* The five style fields spell one line, in the shape the model was trained on; "edit as one line"
- * hands that line to you and stops deriving it. */
+/* The style fields spell one line, in the shape the model's own examples take -- `Genre: … BPM: …`
+ * -- because that is how it was shown songs; "edit as one line" hands that line to you and stops
+ * deriving it. Nothing here is a request field of its own: radiance takes one `instructions` string
+ * and reads the tempo, key and time signature out of it as text. */
 function compose() {
   const sentence = (s, tail = '.') => `${s.trim().replace(/[.,;]+$/, '')}${tail}`;
   const parts = [];
   if (ui.genre.value.trim()) parts.push(`Genre: ${ui.genre.value.trim()}.`);
   if (ui.bpm.value) parts.push(`BPM: ${clamp(Math.round(Number(ui.bpm.value)), 40, 220)}.`);
+  if (ui.songKey.value.trim()) parts.push(`Key: ${ui.songKey.value.trim()}.`);
+  if (ui.timeSig.value.trim()) parts.push(`Time signature: ${ui.timeSig.value.trim()}.`);
   if (ui.mood.value.trim()) parts.push(sentence(ui.mood.value));
   if (ui.vocals.value.trim()) parts.push(`Vocals: ${ui.vocals.value.trim()}.`);
   if (ui.instruments.value.trim()) parts.push(`Instruments: ${ui.instruments.value.trim()}.`);
@@ -108,10 +130,11 @@ function saveDraft() {
     try {
       localStorage.setItem(DRAFT, JSON.stringify({
         lyrics: ui.lyrics.value, raw: raw(), instructions: ui.instructions.value,
-        genre: ui.genre.value, bpm: ui.bpm.value, mood: ui.mood.value, vocals: ui.vocals.value,
-        instruments: ui.instruments.value, duration: ui.durationRange.value,
+        genre: ui.genre.value, bpm: ui.bpm.value, mood: ui.mood.value, songKey: ui.songKey.value,
+        vocals: ui.vocals.value, timeSig: ui.timeSig.value, instruments: ui.instruments.value,
+        duration: ui.durationRange.value, byFrames: ui.byFrames.checked,
         noLength: ui.noLength.checked, seed: ui.seed.value, steps: ui.steps.value,
-        guidance: ui.guidance.value, stream: ui.stream.checked, model: ui.model.value,
+        guidance: ui.guidance.value, transport: transport(), model: ui.model.value,
       }));
     } catch { /* private mode, or a full quota: the takes matter more than the draft */ }
   }, 300);
@@ -124,12 +147,13 @@ function restoreDraft() {
   if (d.raw) ui.rawToggle.click();                       // the fields and the textarea swap roles
   for (const [key, node] of Object.entries({
     lyrics: ui.lyrics, instructions: ui.instructions, genre: ui.genre, bpm: ui.bpm, mood: ui.mood,
-    vocals: ui.vocals, instruments: ui.instruments, seed: ui.seed, steps: ui.steps,
-    guidance: ui.guidance,
+    songKey: ui.songKey, vocals: ui.vocals, timeSig: ui.timeSig, instruments: ui.instruments,
+    seed: ui.seed, steps: ui.steps, guidance: ui.guidance,
   })) if (typeof d[key] === 'string') node.value = d[key];
   if (typeof d.duration === 'string') ui.durationRange.value = d.duration;
+  if (typeof d.byFrames === 'boolean') ui.byFrames.checked = d.byFrames;
   if (typeof d.noLength === 'boolean') ui.noLength.checked = d.noLength;
-  if (typeof d.stream === 'boolean') ui.stream.checked = d.stream;
+  if (TRANSPORTS[d.transport]) setTransport(d.transport);
   state.draftModel = d.model || '';
   return true;
 }
@@ -141,7 +165,9 @@ ui.rawToggle.addEventListener('click', () => {
   ui.rawToggle.setAttribute('aria-pressed', on ? 'false' : 'true');
   ui.rawToggle.textContent = on ? 'edit as one line' : 'back to the fields';
   ui.instructions.readOnly = !on;
-  for (const input of [ui.genre, ui.bpm, ui.mood, ui.vocals, ui.instruments]) input.disabled = on;
+  for (const input of [ui.genre, ui.bpm, ui.mood, ui.songKey, ui.vocals, ui.timeSig, ui.instruments]) {
+    input.disabled = on;
+  }
   ui.instHint.textContent = on
     ? 'Sent as `instructions` exactly as written. The model reads it as plain text: genre, tempo, key, mood, vocals, instruments.'
     : 'Sent as `instructions`. The model reads it as plain text: genre, tempo, key, mood, vocals, instruments.';
@@ -151,13 +177,27 @@ ui.rawToggle.addEventListener('click', () => {
 ui.durationRange.max = String(CONF.maxDuration);
 ui.durationRange.value = String(CONF.defaultDuration);
 function syncDuration() {
-  ui.durationOut.textContent = ui.noLength.checked ? 'to the end' : `${ui.durationRange.value} s`;
+  const seconds = Number(ui.durationRange.value);
+  ui.durationOut.textContent = ui.noLength.checked ? 'to the end' : `${seconds} s`;
   ui.durationRange.disabled = ui.noLength.checked;
+  /* The model's own unit, next to ours: it is what `max_new_tokens` counts, and the request says it
+   * that way when "ask in frames" is ticked. */
+  ui.framesOut.textContent = ui.noLength.checked
+    ? `${settings.MODEL_MAX_SECONDS * FRAMES_PER_SECOND} frames at most`
+    : `${framesOf(seconds)} frames`;
 }
 ui.durationRange.addEventListener('input', () => { syncDuration(); saveDraft(); });
 ui.noLength.addEventListener('change', () => { syncDuration(); saveDraft(); });
-for (const input of [ui.seed, ui.steps, ui.guidance, ui.stream]) input.addEventListener('change', saveDraft);
+for (const input of [ui.seed, ui.steps, ui.guidance, ui.byFrames]) input.addEventListener('change', saveDraft);
+for (const radio of [ui.transportSse, ui.transportAudio, ui.transportWhole]) {
+  radio.addEventListener('change', saveDraft);
+}
 ui.model.addEventListener('change', saveDraft);
+
+const transport = () => (ui.transportAudio.checked ? 'audio' : ui.transportWhole.checked ? 'whole' : 'sse');
+function setTransport(kind) {
+  (kind === 'audio' ? ui.transportAudio : kind === 'whole' ? ui.transportWhole : ui.transportSse).checked = true;
+}
 
 ui.dice.addEventListener('click', () => { ui.seed.value = String(Math.floor(Math.random() * 1e15)); });
 
@@ -208,29 +248,44 @@ function readForm() {
   if (!duration || duration < 1 || duration > CONF.maxDuration) {
     return { error: `The length is ${CONF.maxDuration} seconds at most, or nothing at all.` };
   }
+  const via = transport();
+  const byFrames = ui.byFrames.checked && !!duration;
   return {
     body: {
       model: ui.model.value,
       input,
       instructions,
-      response_format: ui.stream.checked ? 'pcm' : 'wav',
-      ...(ui.stream.checked ? { stream: true } : {}),
-      ...(duration ? { duration } : {}),
+      /* One wav at the end, or the bytes as they are made, or the events that carry them -- and the
+       * events carry raw PCM, so their response_format has to say pcm. */
+      ...(via === 'sse' ? { response_format: 'pcm', stream: true }
+        : via === 'audio' ? { response_format: 'wav', stream_format: 'audio' }
+        : { response_format: 'wav' }),
+      ...(duration ? (byFrames ? { max_new_tokens: framesOf(duration) } : { duration }) : {}),
       ...(seed >= 0 ? { seed } : {}),
       num_inference_steps: steps,
       guidance_scale: guidance,
     },
-    params: { duration, seed, steps, guidance, stream: ui.stream.checked },
+    params: { duration, byFrames, transport: via, seed, steps, guidance },
   };
 }
 
 /* ─────────────────────────────────────── llama-swap ─────────────────────────────────────── */
 
+/* Every call that belongs to llama-swap goes through here, so the llama-swap this browser chose (if
+ * it chose one) is named on all of them -- model list, health, what is loaded, unload, and the song
+ * request. The container honours that header only for a url its deployment listed in
+ * UPSTREAM_OPTIONS, so choosing something it never listed is a request that goes nowhere new. */
+function api(path, init = {}) {
+  const up = settings.get().upstream;
+  if (!up) return fetch(path, init);
+  return fetch(path, { ...init, headers: { ...(init.headers || {}), 'X-Upstream': up } });
+}
+
 /* The model list, its health line, and what it currently has loaded. All three are llama-swap's
  * own endpoints, which the container proxies beside the OpenAI ones. */
 async function refreshModels() {
   try {
-    const res = await fetch('v1/models');
+    const res = await api('v1/models');
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const ids = (await res.json()).data?.map(m => m.id) ?? [];
     const keep = ui.model.value;
@@ -255,7 +310,7 @@ async function refreshModels() {
 async function refreshStatus() {
   if (state.busy) return;                      // a swap in flight answers nothing useful
   try {
-    const [health, running] = await Promise.all([fetch('health'), fetch('running').catch(() => null)]);
+    const [health, running] = await Promise.all([api('health'), api('running').catch(() => null)]);
     if (!health.ok) throw new Error(String(health.status));
     let loaded = [];
     if (running?.ok) {
@@ -280,7 +335,7 @@ function setStatus(kind, text) {
 ui.unload.addEventListener('click', async () => {
   ui.unload.disabled = true;
   try {
-    const res = await fetch('api/models/unload', { method: 'POST' });
+    const res = await api('api/models/unload', { method: 'POST' });
     line(res.ok ? 'Asked llama-swap to unload every model.' : `llama-swap refused: HTTP ${res.status}`);
   } finally {
     ui.unload.disabled = false;
@@ -304,14 +359,16 @@ async function generate() {
   state.ctrl = new AbortController();
   setBusy(true);
   const startedAt = Date.now();
-  line(params.stream
+  line(params.transport === 'sse'
     ? `Asking ${body.model} for a song. The first window comes once it has 200 frames to denoise.`
-    : `Asking ${body.model} for a song. Nothing comes back until the whole song is made.`, true);
+    : params.transport === 'audio'
+      ? `Asking ${body.model} for a song as bytes: they arrive while it is still being made.`
+      : `Asking ${body.model} for a song. Nothing comes back until the whole song is made.`, true);
 
   let parts = [], rate = 44100, channels = 2, seed = params.seed, seconds = 0, usage = null;
   let player = null, wav = null;
   try {
-    const res = await fetch('v1/audio/speech', {
+    const res = await api('v1/audio/speech', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -326,7 +383,7 @@ async function generate() {
     channels = Number(res.headers.get('X-Audio-Channels')) || channels;
 
     const type = res.headers.get('Content-Type') || '';
-    if (params.stream && type.includes('event-stream')) {
+    if (params.transport === 'sse' && type.includes('event-stream')) {
       if (graph.ensure(rate)) {
         await graph.resume();
         player = new WindowPlayer(graph, rate, channels);
@@ -351,12 +408,27 @@ async function generate() {
         }
       }
       wav = pcmToWav(parts, rate, channels);
+    } else if (params.transport === 'audio' && res.body) {
+      /* The song as it is made, without base64 around it: a wav header that states no length -- a
+       * stream's cannot know its own size yet -- then the samples. There is nothing to play partway
+       * through here, since the samples have no seekable file behind them until they are all in, so
+       * this path counts the wait and writes a header that knows the size when it is over.
+       *
+       * The bytes are the model's, unchanged: 16-bit PCM at the rate and channel count the response
+       * headers name, which is what makes the rebuilt header exact. */
+      const bytes = await readChunks(res.body, (total) => {
+        seconds = secondsOf(total - 44, rate, channels);
+        line(`Coming in: ${seconds.toFixed(1)} s of audio, ${elapsed(startedAt)} in.`);
+      });
+      const pcm = isWav(bytes) ? bytes.subarray(44) : bytes;
+      seconds = secondsOf(pcm.length, rate, channels);
+      wav = pcmToWav([pcm], rate, channels);
     } else {
       /* The whole song in one body: either a wav to keep as it is, or raw PCM to put a header on. */
       const buf = await res.arrayBuffer();
-      const isWav = type.includes('wav');
-      seconds = (buf.byteLength - (isWav ? 44 : 0)) / (2 * channels * rate);
-      wav = isWav
+      const asWav = type.includes('wav');
+      seconds = secondsOf(buf.byteLength - (asWav ? 44 : 0), rate, channels);
+      wav = asWav
         ? new Blob([buf], { type: 'audio/wav' })
         : pcmToWav([new Uint8Array(buf)], rate, channels);
     }
@@ -370,7 +442,10 @@ async function generate() {
       model: body.model,
       input: body.input,
       instructions: body.instructions,
-      params: { duration: params.duration, seed, steps: params.steps, guidance: params.guidance },
+      params: {
+        duration: params.duration, byFrames: params.byFrames, transport: params.transport,
+        seed, steps: params.steps, guidance: params.guidance,
+      },
       seed, rate, channels, seconds,
       frames: usage?.output_tokens ?? null,
       bytes: wav.size,
@@ -378,8 +453,8 @@ async function generate() {
       blob: wav,
     };
     await saveTake(take);
-    show(take, { autoplay: !params.stream });
-    const made = `Made in ${elapsed(startedAt)}${params.stream ? ' (streamed)' : ''}`;
+    show(take, { autoplay: params.transport !== 'sse' });
+    const made = `Made in ${elapsed(startedAt)} (${TRANSPORTS[params.transport]})`;
     line(`${seconds.toFixed(1)} s of ${body.model}, seed ${seed}. ${made}, ${(wav.size / 1e6).toFixed(1)} MB.`);
     if (player) await player.drain();
     meter.stop();
@@ -485,7 +560,8 @@ function takeRow(take) {
   const sub = document.createElement('div');
   sub.className = 't-sub';
   sub.textContent = `${new Date(take.ts).toLocaleString()} · ${take.seconds?.toFixed(0) ?? '?'} s · ${take.model}`
-    + `${take.params?.duration ? ` · ${take.params.duration} s asked` : ' · length to the end'}`;
+    + `${take.params?.duration ? ` · ${take.params.duration} s${take.params.byFrames ? ' (asked in frames)' : ' asked'}` : ' · length to the end'}`
+    + `${TRANSPORTS[take.params?.transport] ? ` · via ${TRANSPORTS[take.params.transport]}` : ''}`;
   title.title = take.instructions;
   main.append(title, sub);
 
@@ -534,6 +610,8 @@ function recall(take) {
   ui.steps.value = String(take.params?.steps ?? 30);
   ui.guidance.value = String(take.params?.guidance ?? 1.7);
   ui.noLength.checked = !take.params?.duration;
+  ui.byFrames.checked = !!take.params?.byFrames;
+  if (TRANSPORTS[take.params?.transport]) setTransport(take.params.transport);
   if (take.params?.duration) ui.durationRange.value = String(clamp(take.params.duration, 5, CONF.maxDuration));
   sync(); syncDuration();
   ui.lyrics.focus();
@@ -548,7 +626,8 @@ function show(take, { autoplay = true } = {}) {
   ui.audio.src = state.url;
   ui.nowTitle.textContent = take.title;
   ui.nowMeta.textContent = `${take.seconds.toFixed(1)} s · ${take.rate} Hz · ${take.channels === 2 ? 'stereo' : 'mono'}`
-    + ` · ${fmtBytes(take.bytes)} · seed ${take.seed ?? '—'} · ${take.model}`;
+    + ` · ${fmtBytes(take.bytes)} · seed ${take.seed ?? '—'} · ${take.model}`
+    + `${TRANSPORTS[take.params?.transport] ? ` · via ${TRANSPORTS[take.params.transport]}` : ''}`;
   ui.download.href = state.url;
   ui.download.download = `${slug(take.title)}-${take.seed ?? 'noseed'}.wav`;
   ui.download.hidden = false;
@@ -646,6 +725,7 @@ function showError(problem) {
 function hideError() { ui.error.hidden = true; ui.error.innerHTML = ''; }
 
 function elapsed(ms) { return secs(Date.now() - ms); }
+const secondsOf = (bytes, rate, channels) => Math.max(0, bytes) / (2 * channels * rate);
 function secs(ms) {
   const s = Math.max(0, Math.round(ms / 1000));
   return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`;
@@ -660,14 +740,104 @@ function fmtBytes(n) {
 const esc = (s) => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const slug = (s) => (s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'song').slice(0, 48);
 
+/* ─────────────────────────────────────── settings ─────────────────────────────────────── */
+
+/* The panel's fields, keyed by what settings.js calls each. `stream` and `upstream` are handled with
+ * them below -- one is a tick, one a list -- and `upstreamOptions`, `upstreamDefault` and `version`
+ * describe the deployment, so the panel only reads those. */
+const SETTING_FIELDS = {
+  model: 'sModel', title: 'sTitle', maxDuration: 'sMaxDuration',
+  defaultDuration: 'sDefaultDuration', requestTimeout: 'sTimeout',
+};
+const applied = {};
+const upstreamLabel = (url) => settings.get().upstreamOptions.find(o => o.url === url)?.label || url;
+
+/* Put the settings on the page: the title, the slider's ceiling and value, the footer's summary. Run
+ * on every change, so a setting that was typed takes effect for the next request without a reload. */
+function applySettings() {
+  const s = (CONF = settings.get());
+  document.title = `${s.title} · MiniMax-Music3`;
+  ui.title.textContent = s.title;
+  ui.durationRange.max = String(s.maxDuration);
+  if (applied.defaultDuration !== s.defaultDuration) {
+    ui.durationRange.value = String(Math.min(s.defaultDuration, s.maxDuration));
+    applied.defaultDuration = s.defaultDuration;
+  }
+  if (Number(ui.durationRange.value) > s.maxDuration) ui.durationRange.value = String(s.maxDuration);
+  if (applied.stream !== s.stream && transport() !== 'audio') {
+    setTransport(s.stream ? 'sse' : 'whole');
+    applied.stream = s.stream;
+  }
+  const changed = settings.changedKeys();
+  ui.about.textContent = `waits ${s.requestTimeout}s · up to ${s.maxDuration}s a song`
+    + `${s.version ? ` · ${s.version.slice(0, 7)}` : ''}`
+    + `${s.upstream ? ` · ${upstreamLabel(s.upstream)}` : ''}`
+    + `${changed.length ? ` · ${changed.length} changed here` : ''}`;
+  ui.about.title = changed.length ? `this browser changed: ${changed.join(', ')}` : '';
+  syncDuration();
+}
+
+function renderSettings() {
+  const s = settings.get();
+  for (const [key, id] of Object.entries(SETTING_FIELDS)) ui[id].value = String(s[key]);
+  ui.sStream.checked = s.stream;
+  ui.sUpstream.replaceChildren(...[
+    { value: '', text: `this container's own${s.upstreamDefault ? ` — ${s.upstreamDefault}` : ''}` },
+    ...s.upstreamOptions.map(o => ({ value: o.url, text: `${o.label} — ${o.url}` })),
+  ].map(({ value, text }) => {
+    const o = document.createElement('option');
+    o.value = value; o.textContent = text;
+    return o;
+  }));
+  ui.sUpstream.value = s.upstreamOptions.some(o => o.url === s.upstream) ? s.upstream : '';
+  const changed = settings.changedKeys();
+  ui.sNote.textContent = changed.length
+    ? `Changed in this browser: ${changed.join(', ')}. Reset puts them back to what the container was deployed with.`
+    : 'Nothing changed here: every value above is what the container was deployed with.';
+  ui.settingsReset.disabled = !changed.length;
+  ui.sHint.textContent = s.upstreamOptions.length
+    ? `This deployment lets a browser choose between ${s.upstreamOptions.length + 1} llama-swaps.`
+    : 'This deployment lists no other llama-swap, so that choice does nothing here.';
+}
+
+for (const [key, id] of Object.entries(SETTING_FIELDS)) {
+  ui[id].addEventListener('change', () => {
+    settings.set({ [key]: ui[id].value });
+    renderSettings();
+    if (key === 'model') refreshModels();      // the picker tries the new preselect straight away
+  });
+}
+ui.sStream.addEventListener('change', () => {
+  settings.set({ stream: ui.sStream.checked });
+  renderSettings();
+});
+ui.sUpstream.addEventListener('change', () => {
+  settings.set({ upstream: ui.sUpstream.value });
+  renderSettings();
+  refreshModels();
+  refreshStatus();                             // the pill now describes a different server
+});
+ui.settingsReset.addEventListener('click', () => {
+  settings.reset();
+  renderSettings();
+  refreshModels();
+  refreshStatus();
+});
+ui.settings.addEventListener('click', () => {
+  renderSettings();
+  ui.settingsDialog.showModal();
+});
+settings.onChange(applySettings);
+
 /* ─────────────────────────────────────── start ─────────────────────────────────────── */
 
-ui.stream.checked = CONF.stream;
-restoreDraft();          // what was being typed, if anything
+renderSettings();
+applySettings();           // the deployment's values, plus anything this browser changed
+restoreDraft();            // what was being typed, which may name a length or a transport
+applySettings();           // ...and the draft has to obey the ceiling the settings set
 sync();
 syncDuration();
 loadStore();
-ui.about.textContent = `waits ${CONF.requestTimeout}s · up to ${CONF.maxDuration}s a song`;
 await refreshModels();
 refreshStatus();
 setInterval(refreshStatus, 20000);
