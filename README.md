@@ -116,7 +116,62 @@ For a change to the page while it is being written, `scripts/build.sh` tags a lo
 and a GGUF does not: `healthCheckTimeout` long enough for the load, and no deadline on the wait for
 a response's first byte (which, unstreamed, is the whole render).
 
-### 3. Komodo
+### 3. The stack
+
+One service, on the host's network. This is `deploy/stack.yml` with its comments taken out and its
+values written as literals, which is what a deployment ends up being:
+
+```yaml
+services:
+  radiance-studio:
+    image: ghcr.io/apfrancis1992/radiance-studio:42fec89   # whatever scripts/publish.sh last pushed
+    container_name: radiance-studio
+    restart: unless-stopped
+    init: true
+    network_mode: host          # so 127.0.0.1 below is the host's own, where llama-swap listens
+    environment:
+      PORT: "8090"                            # the port on the host
+      UPSTREAM_URL: "http://127.0.0.1:8080"   # llama-swap, not radiance
+      UPSTREAM_API_KEY: ""                    # llama-swap's `apikey:`, if it has one
+      MODEL: "minimax-music3"                 # llama-swap's name for the model, not the .rad file
+      APP_TITLE: "radiance studio"
+      STREAM_DEFAULT: "true"                  # play each window as it arrives
+      MAX_DURATION: "360"                     # MiniMax-Music3's ceiling
+      DEFAULT_DURATION: "30"
+      REQ_TIMEOUT: "1800"                     # long enough to cover a cold model load
+      RESOLVER: "127.0.0.11"                  # only used if UPSTREAM_URL names a host
+      UPSTREAM_OPTIONS: '[]'                  # other llama-swaps a browser may pick, as JSON
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8090/healthz"]   # PORT again
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+```
+
+Save that as `stack.yml` on the GPU host and `docker compose -f stack.yml up -d` is a deployment:
+nothing else has to be installed, and nothing has to be persisted — the takes live in the browser,
+so the container is disposable and there is no volume to get wrong.
+
+Two lines are real decisions: the `image:` tag, and `MODEL`. `UPSTREAM_URL` is already right for a
+llama-swap on the same host, `UPSTREAM_API_KEY` is already right for one with no `apikey:`, and the
+rest of the numbers are MiniMax-Music3's own. A different `PORT` has to change in two places, since
+the healthcheck line repeats it.
+
+`deploy/stack.yml` in the repo is this same service with every value written as `${VAR:-default}`
+instead, so nothing has to be edited in order to be changed: Komodo writes a stack's environment into
+an `.env` file beside the compose and passes it with `--env-file`, a shell does it with
+`MODEL=minimax-music3 docker compose -f deploy/stack.yml up -d`, and a variable nobody sets takes the
+default the image was built with. `scripts/check-stack.sh` compares both files, and this block, with
+the image's own `ENV` — so an example in a README cannot quietly promise a setting that does not
+exist.
+
+### 4. Komodo
 
 *Stacks → New Stack*, paste the output of `scripts/publish.sh --compose` -- `deploy/stack.yml` with
 the image line pinned to the commit it just pushed -- and put `deploy/env.example`'s values in the

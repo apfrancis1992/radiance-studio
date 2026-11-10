@@ -17,6 +17,8 @@
 #      calls a container that never started healthy.
 #   4. The page reads fields out of /config.json. If the template stops returning one, the setting
 #      silently falls back instead of failing, so the pair is checked together.
+#   5. The README shows a compose to copy. It is checked against the image too, because a README that
+#      advertises a setting nobody implemented is worse than one that says nothing.
 #
 # Needs git, for --compose. The nginx syntax test of the rendered template is CI's job -- it wants
 # the image's own nginx and its /etc/nginx/conf.d layout, not whatever is on this machine.
@@ -104,5 +106,50 @@ else
   no 'the pasted stack dropped network_mode: host -- 127.0.0.1 would then be the container itself'
 fi
 
+# The compose in the README is the one people copy, so it is held to the same standard as
+# deploy/stack.yml: the settings the image actually defines, the port its own healthcheck names, an
+# image line pointing at the registry scripts/publish.sh pushes to, and a tag that is a commit of
+# this repository rather than one typed from memory.
+readme=$(awk '/^```yaml$/{buf="";inb=1;next} /^```$/{if (inb && buf ~ /services:/) printf "%s", buf; inb=0; next} inb{buf=buf $0 "\n"}' README.md)
+if [ -z "$readme" ]; then
+  no 'README.md has no compose block to check'
+else
+  want=$(sh scripts/template-vars.sh | tr ' ' '\n' | tr -d '$' | grep -vx VERSION | sort -u)
+  have=$(printf '%s\n' "$readme" | sed -n 's/^      \([A-Z_][A-Z_0-9]*\):.*/\1/p' | sort -u)
+  if [ "$want" = "$have" ]; then
+    ok "the README's compose offers the $(printf '%s\n' "$have" | wc -l | tr -d ' ') settings the image defines, and no others"
+  else
+    no "the README's compose and the image disagree -- image: [$(printf '%s\n' "$want" | tr '\n' ' ')] README: [$(printf '%s\n' "$have" | tr '\n' ' ')]"
+  fi
+
+  rport=$(printf '%s\n' "$readme" | sed -n 's/^      PORT: "\([0-9]*\)".*/\1/p')
+  if [ -n "$rport" ] && printf '%s\n' "$readme" | grep -qF "http://127.0.0.1:$rport/healthz"; then
+    ok "its healthcheck names the port it sets ($rport)"
+  else
+    no "the README's healthcheck does not name its own PORT (${rport:-unset}) -- a changed port would leave it probing nothing"
+  fi
+
+  # Where the image comes from is taken from publish.sh itself rather than from the stack it just
+  # printed, because that output is a tag only when there is a commit to name -- in a directory with
+  # no git history it says `:dev`, and the tail of that is what used to end up in `repo`.
+  repo=$(sed -n 's#^IMAGE=\${IMAGE:-\(.*\)}#\1#p' scripts/publish.sh | head -1)
+  if [ -n "$repo" ] && printf '%s\n' "$readme" | grep -q "image: $repo:"; then
+    ok "it pulls from the registry publish.sh pushes to ($repo)"
+  else
+    no "the README's compose is not pulling ${repo:-the registry publish.sh pushes to}"
+  fi
+
+  rsha=$(printf '%s\n' "$readme" | sed -n 's#.*radiance-studio:\([0-9a-f]\{7,40\}\).*#\1#p' | head -1)
+  if ! git rev-parse HEAD >/dev/null 2>&1; then
+    ok "its tag ($rsha) not checked here: no git history in this checkout"
+  elif git rev-parse --is-shallow-repository 2>/dev/null | grep -q true; then
+    ok "its tag ($rsha) not checked here: the checkout is shallow"
+  elif [ -n "$rsha" ] && git cat-file -e "$rsha^{commit}" 2>/dev/null; then
+    ok "its tag ($rsha) is a commit of this repository"
+  else
+    no "the README's example tags ${rsha:-nothing}, which is not a commit of this repository"
+  fi
+fi
+
 [ "$fails" -eq 0 ] || { echo "$fails problem(s) in what Komodo would be given"; exit 1; }
-echo 'the stack, the template and the publish path are consistent'
+echo 'the stack, the template, the README and the publish path are consistent'
