@@ -80,12 +80,14 @@ scripts/publish.sh                                        # -> ghcr.io/apfrancis
 The token is piped to `docker login`, not written into a file. Nothing is compiled, so the build is
 a second and the image is nginx plus 60 KB of files.
 
-The first push creates the package **private**, which ghcr does not let you decide at push time;
-`publish.sh` flips it with the packages API and, when the token cannot, prints where the switch is.
-It then checks the thing that matters -- an anonymous token exchange and a manifest fetch, the same
-two calls a host with no credentials makes -- so "public" is measured rather than assumed. With a
-private package, `docker login ghcr.io` on the host Komodo deploys to (or a Registry provider on
-the stack) is what makes the pull work.
+The first push creates the package **private**, and ghcr gives no API for the switch -- the packages
+endpoints answer 404 for container packages, whatever token asks -- so `publish.sh` does not guess.
+It asks the registry the question a deploy actually depends on, anonymously: token exchange, then
+the manifest, the same two calls a credential-less host makes. If the answer is no it prints the one
+web-UI click (`Package settings → Change visibility → Public`) and re-probes for two minutes while
+you make it. `scripts/publish.sh --check` re-asks at any time. With a private package instead,
+`docker login ghcr.io` on the host Komodo deploys to (or a Registry provider on the stack) is what
+makes the pull work.
 
 For a change to the page while it is being written, `scripts/build.sh` tags a local image and
 `dev/run.sh` serves it.
