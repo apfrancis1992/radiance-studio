@@ -1,0 +1,75 @@
+# The llama-swap configuration for MiniMax-Music3 on radiance: paste the model entry into your
+# config.yaml's `models:` and raise the two timeouts at the top.
+#
+# Paths, the image tag and the API key are the parts you will change. Radiance's own flags and
+# container settings are what deploy/compose/minimax-music3.yaml in the radiance tree runs with,
+# spelled for `cmd` instead of compose: both cards, the host's network, the model directory
+# read-only, memlock unlimited, and the key through the container's environment rather than its
+# command line (argv is world-readable in `ps` and /proc).
+#
+#   llama-swap -config this-file.yaml -listen 0.0.0.0:8080
+#
+# A model's key here is what the page sends as `model`, so it is also what MODEL in the stack names.
+# If you set `apiKeys:` below, the stack's UPSTREAM_API_KEY has to be one of them: this container
+# adds `Authorization: Bearer <key>` to every proxied call, which keeps the key out of the page.
+
+# The three things that are yours: where the .rad files are, and the two groups radiance needs for
+# the cards (their numbers, as radiance's own compose file takes them).
+macros:
+  MODELS_DIR: "${env.HOME}/models"
+  VIDEO_GROUP: "989"
+  RENDER_GROUP: "996"
+
+# How long llama-swap waits for a model's health endpoint before it gives up. The default is 120 s.
+# Radiance answers /health as soon as its HTTP server is up, which for a 20 GiB checkpoint is after
+# the load, not before it: give it room, or the first song fails and llama-swap retries the swap.
+healthCheckTimeout: 1200
+
+models:
+  minimax-music3:
+    name: MiniMax-Music3
+    description: songs from lyrics and a description, on radiance (/v1/audio/speech)
+
+    cmd: |
+      docker run --rm --name ${MODEL_ID}
+      --init --network host
+      --device /dev/kfd --device /dev/dri
+      --group-add ${VIDEO_GROUP} --group-add ${RENDER_GROUP}
+      --security-opt seccomp=unconfined
+      --ulimit memlock=-1
+      -v ${MODELS_DIR}:/models:ro
+      -e RADIANCE_API_KEY=${env.RADIANCE_API_KEY}
+      stilldeadcode/radiance:latest
+      --model /models/minimax-music3-bf16.rad
+      --host :: --port ${PORT} --api-key-env RADIANCE_API_KEY --tp 2
+
+    # ${PORT} is llama-swap's own port macro, so this is where radiance listens; the two cards are
+    # the host's, and host networking means nothing has to be published.
+    proxy: http://127.0.0.1:${PORT}
+    checkEndpoint: /health
+
+    # Stop it with SIGTERM through `docker stop` and give it the minute radiance takes to finish the
+    # step in flight and release the cards.
+    cmdStop: docker stop ${MODEL_ID}
+    unloadTimeout: 60
+
+    # 0 = never unload on its own. The load costs minutes, so a ttl would spend the machine
+    # reloading the same checkpoint. Set it to whatever you would rather pay for the free memory.
+    ttl: 0
+
+    # responseHeader is how long llama-swap waits for the first byte of the answer. A streamed song
+    # answers at once; a whole one sends its headers when the song is finished, which for six minutes
+    # of audio is six minutes away. 0 is no deadline.
+    timeouts:
+      responseHeader: 0
+      idleConn: 900
+
+    # radiance refuses a request carrying a field the route does not have, and `speed` is one it
+    # refuses outright for this model (the song's tempo is in the description). A chat client wired
+    # to the same endpoint would otherwise trip over it.
+    filters:
+      stripParams: speed
+
+# With a `matrix` or `groups` entry you can keep the music model resident beside a small chat model
+# instead of swapping; on two 32 GB cards the 20 GiB checkpoint and a 27B FP8 do not fit together,
+# so the ordinary one-at-a-time swap is what this assumes.

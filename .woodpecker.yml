@@ -1,0 +1,37 @@
+# Codeberg CI (Woodpecker): the image, and a check that what it holds is loadable.
+#
+# There is nothing to compile -- the tree is a directory of static files, one nginx template and a
+# Dockerfile that copies them -- so the tests are the two ways this thing can actually be broken:
+# JavaScript the browser refuses to run, and a config template that envsubst leaves unparseable (an
+# unquoted brace, a ${VAR} the image's ENV forgot to define). Both run before the build.
+when:
+  - event: [push, pull_request, tag]
+
+steps:
+  check:
+    image: alpine:3.21
+    commands:
+      - apk add --no-cache nodejs gettext nginx
+      - for f in public/*.js; do node --input-type=module --check < "$f"; done
+      # The same substitution the container's entrypoint performs, then the same syntax test.
+      - mkdir -p /etc/nginx/conf.d
+      - PORT=8090 UPSTREAM_URL=http://127.0.0.1:8080 UPSTREAM_API_KEY= MODEL=x APP_TITLE=t
+          STREAM_DEFAULT=true MAX_DURATION=360 DEFAULT_DURATION=30 REQ_TIMEOUT=1800
+          RESOLVER=127.0.0.11
+          envsubst < nginx/default.conf.template > /etc/nginx/conf.d/default.conf
+      - grep -q 'proxy_pass http://127.0.0.1:8080$request_uri' /etc/nginx/conf.d/default.conf
+      - nginx -t
+
+  image:
+    image: docker:28
+    volumes: [/var/run/docker.sock:/var/run/docker.sock]
+    environment:
+      REGISTRY: ${REGISTRY:-}               # e.g. ghcr.io/yourname; empty builds without pushing
+      IMAGE: ${IMAGE:-radiance-studio}
+    commands:
+      - docker build -t ${IMAGE}:latest .
+      - test -z "$$REGISTRY" || docker tag ${IMAGE}:latest $$REGISTRY/$$IMAGE:latest
+      - test -z "$$REGISTRY" || docker push $$REGISTRY/$$IMAGE:latest
+    when:
+      - event: [push, tag]
+        branch: main

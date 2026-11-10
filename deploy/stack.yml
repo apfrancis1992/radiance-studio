@@ -1,0 +1,60 @@
+# The Komodo stack (this file is also a plain `docker compose -f` file). One container: the page and
+# the reverse proxy in front of llama-swap.
+#
+# In Komodo: Stacks -> New Stack -> Import from file, or paste this into the editor, and put the
+# values below in the stack's environment. With "env file" instead, use deploy/env.example as the
+# starting point.
+#
+# Settings arrive as environment variables and nginx reads them once, at start -- so a changed
+# UPSTREAM_URL or MODEL is a redeploy, not a rebuild.
+
+services:
+  radiance-studio:
+    image: ${IMAGE:-radiance-studio:latest}
+    container_name: radiance-studio
+    restart: unless-stopped
+    init: true
+    # The same posture as radiance's own containers and, usually, llama-swap's: the host's own
+    # addresses, no NAT between this proxy and the llama-swap it points at. That is what makes the
+    # default UPSTREAM_URL below correct -- llama-swap on this host's loopback.
+    network_mode: host
+    environment:
+      # The port the GUI listens on, on the host.
+      PORT: ${PORT:-8090}
+      # llama-swap, not radiance: the page names the model in each request body and llama-swap
+      # loads whatever server serves it. A bridge network instead of this one wants the container
+      # name, e.g. http://llama-swap:8080, plus RESOLVER=127.0.0.11.
+      UPSTREAM_URL: ${UPSTREAM_URL:-http://127.0.0.1:8080}
+      # Only if llama-swap has `apikey:` configured. Sent as Authorization: Bearer <key>; leave
+      # empty to send no header. It never reaches the browser.
+      UPSTREAM_API_KEY: ${UPSTREAM_API_KEY:-}
+      # The model id to preselect -- the name llama-swap's config gives the MiniMax-Music3 entry,
+      # not the file radiance loads. The page lists what /v1/models reports either way, so this is
+      # only a default; empty picks the first id that looks like a music model.
+      MODEL: ${MODEL:-}
+      # The title in the page's header.
+      APP_TITLE: ${APP_TITLE:-radiance studio}
+      # Play each song's audio windows as they are made, rather than waiting for the whole song.
+      # Worth leaving true: a song is made at about the speed it plays.
+      STREAM_DEFAULT: ${STREAM_DEFAULT:-true}
+      # The length slider's bounds and default, in seconds. 360 is MiniMax-Music3's ceiling (9000
+      # frames at 25 a second); lower it on a card that cannot hold a six minute song.
+      MAX_DURATION: ${MAX_DURATION:-360}
+      DEFAULT_DURATION: ${DEFAULT_DURATION:-30}
+      # How long a request may go without a byte back. Covers a cold model load: the first song
+      # after llama-swap hands the cards to radiance waits for a 20 GiB checkpoint to map in.
+      REQ_TIMEOUT: ${REQ_TIMEOUT:-1800}
+      # Only used when UPSTREAM_URL names a host. 127.0.0.11 is Docker's resolver inside a network;
+      # on the host network, use the host's own resolver (127.0.0.53 under systemd-resolved).
+      RESOLVER: ${RESOLVER:-127.0.0.11}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:${PORT:-8090}/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

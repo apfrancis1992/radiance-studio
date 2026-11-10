@@ -1,0 +1,7 @@
+# The image is nginx plus public/ and one template: nothing else needs to reach the daemon.
+.git
+deploy
+dev
+scripts
+*.md
+.env*

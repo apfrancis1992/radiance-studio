@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>radiance studio</title>
+<meta name="description" content="A small web GUI for MiniMax-Music3 on radiance, behind llama-swap.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23120f1a'/%3E%3Cg fill='%23b78cff'%3E%3Crect x='6' y='13' width='3' height='6' rx='1.5'/%3E%3Crect x='11' y='8' width='3' height='16' rx='1.5'/%3E%3Crect x='16' y='4' width='3' height='24' rx='1.5'/%3E%3Crect x='21' y='10' width='3' height='12' rx='1.5'/%3E%3C/g%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+<script type="module" src="app.js"></script>
+</head>
+<body>
+
+<header>
+  <h1 id="title">radiance studio</h1>
+  <span class="tag">MiniMax-Music3</span>
+  <div class="spacer"></div>
+  <label class="model-pick" for="model" title="The model this page names in each request; llama-swap loads that one">
+    <span>model</span>
+    <select id="model"></select>
+  </label>
+  <button id="unload" class="ghost" title="Ask llama-swap to unload every model and give the cards back">unload</button>
+  <span id="status" class="pill" title="llama-swap"><i></i><span id="statusText">checking</span></span>
+</header>
+
+<main>
+  <!-- ───────────────────────── composer ───────────────────────── -->
+  <section class="pane" aria-labelledby="compose-h">
+    <div class="pane-head">
+      <h2 id="compose-h">Write it</h2>
+      <button id="example" class="link" type="button">load an example</button>
+    </div>
+
+    <form id="form" autocomplete="off">
+      <div class="field">
+        <div class="label-row">
+          <label for="lyrics">Lyrics <em>the words it sings, with section tags</em></label>
+          <span class="count" id="lyricsCount">0</span>
+        </div>
+        <div class="chips" id="tags" role="group" aria-label="Insert a section tag"></div>
+        <textarea id="lyrics" spellcheck="false" rows="12"
+          placeholder="[verse]
+Morning light filtering through the pine
+I left the door open behind me
+[chorus]
+Softly the world begins to breathe"></textarea>
+      </div>
+
+      <div class="field">
+        <div class="label-row">
+          <label for="instructions">Style <em>what it says the song is</em></label>
+          <button id="rawToggle" class="link" type="button" aria-pressed="false">edit as one line</button>
+        </div>
+        <div class="style-grid">
+          <label>genre<input id="genre" list="genreList" placeholder="acoustic pop"></label>
+          <label class="narrow">BPM<input id="bpm" type="number" min="40" max="220" step="1" placeholder="96"></label>
+          <label>mood<input id="mood" placeholder="warm and intimate"></label>
+          <label>vocals<input id="vocals" list="vocalList" placeholder="soft female lead"></label>
+          <label>instruments<input id="instruments" placeholder="nylon guitar, brushed drums"></label>
+        </div>
+        <datalist id="genreList">
+          <option>acoustic pop</option><option>indie folk</option><option>dream pop</option>
+          <option>synthwave</option><option>post-punk</option><option>bossa nova</option>
+          <option>ambient</option><option>string quartet</option><option>lo-fi hip hop</option>
+          <option>power metal</option><option>choral sacred</option><option>jazz trio</option>
+        </datalist>
+        <datalist id="vocalList">
+          <option>soft female lead</option><option>husky male lead</option><option>choir</option>
+          <option>duet, male and female</option><option>rap</option><option>instrumental, no vocals</option>
+        </datalist>
+        <textarea id="instructions" rows="2" spellcheck="false" readonly></textarea>
+        <p class="hint" id="instHint">Sent as <code>instructions</code>. The model reads it as plain text:
+          genre, tempo, key, mood, vocals, instruments.</p>
+      </div>
+
+      <div class="field">
+        <div class="label-row">
+          <label for="durationRange">Length</label>
+          <label class="check"><input type="checkbox" id="noLength">
+            <span>let the model end it</span></label>
+        </div>
+        <div class="len-row">
+          <input type="range" id="durationRange" min="5" max="360" step="5" value="30">
+          <output id="durationOut" for="durationRange">30 s</output>
+        </div>
+        <p class="hint">A song is made at about the speed it plays, so the wait is roughly the length.
+          Six minutes is the model's ceiling.</p>
+      </div>
+
+      <details class="field adv">
+        <summary>Takes</summary>
+        <div class="adv-grid">
+          <label>seed
+            <span class="seed-row">
+              <input id="seed" type="number" min="-1" step="1" value="-1">
+              <button id="dice" class="ghost" type="button" title="Random seed">🎲</button>
+            </span>
+          </label>
+          <label>denoiser steps<input id="steps" type="number" min="1" max="1000" step="1" value="30"></label>
+          <label>guidance<input id="guidance" type="number" min="1" max="30" step="0.1" value="1.7"></label>
+        </div>
+        <label class="check"><input type="checkbox" id="stream">
+          <span>Play each window as it is made instead of waiting for the whole song</span></label>
+        <p class="hint">The same seed, words and length give the same song again on the same deployment,
+          so a take you liked is reproducible. Steps and guidance are the denoiser's; the defaults are
+          what the model ships with.</p>
+      </details>
+
+      <div class="actions">
+        <button id="go" class="primary" type="submit">Make a song</button>
+        <button id="stop" class="ghost" type="button" hidden>Stop</button>
+        <span id="elapsed" class="elapsed"></span>
+      </div>
+      <p class="status-line" id="statusLine" role="status" aria-live="polite"></p>
+      <div class="error" id="error" hidden></div>
+    </form>
+  </section>
+
+  <!-- ───────────────────────── this take, and the ones before ───────────────────────── -->
+  <section class="pane" aria-labelledby="play-h">
+    <div class="pane-head">
+      <h2 id="play-h">Listen</h2>
+      <span class="count" id="storage"></span>
+    </div>
+
+    <div class="now">
+      <div class="now-title" id="nowTitle">Nothing yet</div>
+      <div class="now-meta" id="nowMeta">Write lyrics, describe the song, and make one.</div>
+      <canvas id="viz" width="720" height="56" aria-hidden="true"></canvas>
+      <audio id="audio" controls preload="auto"></audio>
+      <div class="now-actions">
+        <a id="download" hidden download>Download .wav</a>
+        <button id="recall" class="ghost" type="button" hidden>Load into the form</button>
+        <button id="reroll" class="ghost" type="button" hidden>Same words, new seed</button>
+      </div>
+    </div>
+
+    <div class="pane-head sub">
+      <h3>Takes</h3>
+      <button id="clear" class="link" type="button">clear</button>
+    </div>
+    <ul class="takes" id="takes"></ul>
+    <p class="hint" id="takesHint" hidden>Songs you make stay in this browser, in IndexedDB, with the
+      seed and the words that made them.</p>
+  </section>
+</main>
+
+<footer>
+  <span>lyrics and instructions go to llama-swap's <code>/v1/audio/speech</code>, which hands them to
+    radiance's MiniMax-Music3. Nothing leaves your machine but the request.</span>
+  <span id="about"></span>
+</footer>
+
+</body>
+</html>

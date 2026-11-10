@@ -1,0 +1,6 @@
+# The image, if you tag it locally; nothing else in this tree is generated.
+*.log
+.DS_Store
+__pycache__/
+node_modules/
+package-lock.json

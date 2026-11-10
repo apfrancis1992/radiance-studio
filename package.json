@@ -1,0 +1,14 @@
+{
+  "name": "radiance-studio",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A web GUI for MiniMax-Music3 on radiance, behind llama-swap. The image is nginx plus public/; this file is only the dev-only browser test.",
+  "type": "module",
+  "scripts": {
+    "check": "node dev/check-page.mjs && node --input-type=module --check < public/app.js",
+    "smoke": "node dev/smoke.mjs"
+  },
+  "devDependencies": {
+    "puppeteer-core": "^24.0.0"
+  }
+}
