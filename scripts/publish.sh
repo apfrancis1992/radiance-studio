@@ -9,11 +9,13 @@
 # One credential is needed: a GitHub token that can write packages. The `gh` CLI's own token works
 # once it has the scope --
 #
-#   gh auth refresh-token -s write:packages
+#   gh auth refresh --hostname github.com -s write:packages      # gh >= 2.9x
+#   gh auth refresh-token -s write:packages                      # gh < 2.9x, same thing
 #
-# -- or set GH_TOKEN to a PAT (classic: write:packages; fine-grained: Packages write). The token is
-# piped to `docker login`, never written to a file, so ~/.docker/config.json keeps no long-lived
-# secret unless docker decides to store it itself.
+# (a browser click; it keeps the scopes gh already has) -- or set GH_TOKEN to a PAT (classic:
+# write:packages; fine-grained: Packages write, plus the `ghcr.io` pull one). The token is piped to
+# `docker login`, never written to a file, so ~/.docker/config.json keeps no long-lived secret
+# unless docker decides to store it itself.
 #
 # The first push creates the package *private*, and ghcr has no way to make it public at push time:
 # the script flips it with the packages API afterwards and, if the token cannot, prints where the

@@ -7,6 +7,10 @@ A small web GUI for [MiniMax-Music3](https://huggingface.co/MiniMaxAI/MiniMax-Mu
 song. It is one nginx container — the page is static files and a reverse proxy, so there is no node
 server, no build step, and nothing to keep warm.
 
+The image is published at
+[`ghcr.io/apfrancis1992/radiance-studio`](https://github.com/users/apfrancis1992/packages/container/package/radiance-studio)
+and [`deploy/stack.yml`](deploy/stack.yml) is the compose to paste into Komodo.
+
 It talks to **llama-swap**, not to radiance directly. Each request names a model in its body, so
 llama-swap loads the 20 GiB checkpoint when you ask for a song and gives the cards back to whatever
 else you run when you are done. The header has an *unload* button, which is `POST
@@ -69,8 +73,8 @@ Dockerfile                  nginx plus those files
 ### 1. Publish the image
 
 ```sh
-gh auth refresh-token -s write:packages    # once, to give the gh CLI permission for packages
-scripts/publish.sh                         # -> ghcr.io/apfrancis1992/radiance-studio:<sha> and :latest
+gh auth refresh --hostname github.com -s write:packages    # once: gh >= 2.9x, `gh auth refresh-token` before that
+scripts/publish.sh                                        # -> ghcr.io/apfrancis1992/radiance-studio:<sha> and :latest
 ```
 
 The token is piped to `docker login`, not written into a file. Nothing is compiled, so the build is
