@@ -1,9 +1,23 @@
-# Codeberg CI (Woodpecker): the image, and a check that what it holds is loadable.
+# Codeberg / Woodpecker: the two ways this thing can actually be broken -- JavaScript the browser
+# refuses to run, and a config template that renders into something nginx will not accept (an
+# unquoted brace, a ${VAR} the image's ENV forgot to define, an envsubst that swallows nginx's own
+# $variables). There is nothing to compile: the tree is static files, one nginx template and a
+# Dockerfile that copies them.
 #
-# There is nothing to compile -- the tree is a directory of static files, one nginx template and a
-# Dockerfile that copies them -- so the tests are the two ways this thing can actually be broken:
-# JavaScript the browser refuses to run, and a config template that envsubst leaves unparseable (an
-# unquoted brace, a ${VAR} the image's ENV forgot to define). Both run before the build.
+# The template step runs in the image the product is: nginx:alpine's own nginx.conf includes
+# /etc/nginx/conf.d/*.conf inside its http context, which is where the container's entrypoint puts
+# the rendered template -- the plain alpine package's nginx.conf includes conf.d in the *main*
+# context instead, so a check there rejects a perfectly good server block. gettext's envsubst comes
+# from the image too; the official nginx image ships it for its own entrypoint.
+#
+# The image itself is published from a workstation by scripts/publish.sh, not here, because the
+# registry is ghcr.io and the credential is a personal packages token; this runner is not asked to
+# hold one. What CI does check is the file you paste into Komodo -- scripts/check-stack.sh, the same
+# one a workstation runs before publishing.
+#
+# `$$` escapes Woodpecker's substitution, which runs on the raw command text and ignores quotes:
+# unescaped, $f in the loops below and $request_uri in the grep would arrive empty, and an empty
+# expansion fails nothing.
 when:
   - event: [push, pull_request, tag]
 
@@ -11,27 +25,31 @@ steps:
   check:
     image: alpine:3.21
     commands:
-      - apk add --no-cache nodejs gettext nginx
-      - for f in public/*.js; do node --input-type=module --check < "$f"; done
-      # The same substitution the container's entrypoint performs, then the same syntax test.
-      - mkdir -p /etc/nginx/conf.d
-      - PORT=8090 UPSTREAM_URL=http://127.0.0.1:8080 UPSTREAM_API_KEY= MODEL=x APP_TITLE=t
-          STREAM_DEFAULT=true MAX_DURATION=360 DEFAULT_DURATION=30 REQ_TIMEOUT=1800
-          RESOLVER=127.0.0.11
-          envsubst < nginx/default.conf.template > /etc/nginx/conf.d/default.conf
-      - grep -q 'proxy_pass http://127.0.0.1:8080$request_uri' /etc/nginx/conf.d/default.conf
+      - apk add --no-cache nodejs
+      - for f in public/*.js; do node --input-type=module --check < "$$f"; done
+      - for f in scripts/*.sh dev/run.sh; do sh -n "$$f"; done
+      - node dev/check-page.mjs
+
+  template:
+    image: docker.io/nginx:alpine
+    commands:
+      # Render the way the container does -- with the image's own defaults, which is the case a Komodo
+      # stack that sets nothing actually hits -- so an ENV line that was forgotten shows up here as an
+      # empty directive rather than as a container that starts and answers nothing.
+      - eval "$$(sed -n '/^ENV /,/[^\\]$$/p' Dockerfile | tr -d '\\' | sed 's/^ENV //; s/^ *//; s/^/export /')"
+      # The list is the whole substitutable surface, and it has to reach envsubst as names, not as the
+      # values the shell would expand them to -- hence the single quotes, and the `$` doubled past
+      # Woodpecker. A bare `envsubst` would also replace nginx's own $variables -- $upstream,
+      # $request_uri -- which is how a config that renders can still be wrong.
+      - envsubst '$${PORT} $${UPSTREAM_URL} $${UPSTREAM_API_KEY} $${MODEL} $${APP_TITLE}
+          $${STREAM_DEFAULT} $${MAX_DURATION} $${DEFAULT_DURATION} $${REQ_TIMEOUT} $${RESOLVER}'
+          < nginx/default.conf.template > /etc/nginx/conf.d/default.conf
+      - grep -q 'proxy_pass $$upstream$$request_uri' /etc/nginx/conf.d/default.conf
+      - grep -q 'listen 8090 default_server' /etc/nginx/conf.d/default.conf
       - nginx -t
 
-  image:
-    image: docker:28
-    volumes: [/var/run/docker.sock:/var/run/docker.sock]
-    environment:
-      REGISTRY: ${REGISTRY:-}               # e.g. ghcr.io/yourname; empty builds without pushing
-      IMAGE: ${IMAGE:-radiance-studio}
+  stack:
+    image: alpine:3.21
     commands:
-      - docker build -t ${IMAGE}:latest .
-      - test -z "$$REGISTRY" || docker tag ${IMAGE}:latest $$REGISTRY/$$IMAGE:latest
-      - test -z "$$REGISTRY" || docker push $$REGISTRY/$$IMAGE:latest
-    when:
-      - event: [push, tag]
-        branch: main
+      - apk add --no-cache git
+      - sh scripts/check-stack.sh

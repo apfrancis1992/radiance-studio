@@ -26,9 +26,17 @@ COPY public/ /usr/share/nginx/html/
 
 # Not EXPOSEd: the stack shares the host's network, as radiance's own containers do, and the port
 # is whatever PORT says at run time.
+#
+# `image.source` is what makes GitHub link the pushed image to the repository, which is how the
+# package gets its permissions and a landing page; scripts/publish.sh passes the commit in as
+# `revision` so a running container says which tree it came from.
+ARG IMAGE_SOURCE=https://github.com/apfrancis1992/radiance-studio
+ARG GIT_SHA=
 LABEL org.opencontainers.image.title="radiance-studio" \
       org.opencontainers.image.description="A web GUI for MiniMax-Music3 on radiance, behind llama-swap" \
-      org.opencontainers.image.licenses="Apache-2.0"
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.source=${IMAGE_SOURCE} \
+      org.opencontainers.image.revision=${GIT_SHA}
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD wget -q -O /dev/null "http://127.0.0.1:${PORT}/healthz" || exit 1

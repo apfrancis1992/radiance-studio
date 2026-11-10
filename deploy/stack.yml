@@ -5,12 +5,19 @@
 # values below in the stack's environment. With "env file" instead, use deploy/env.example as the
 # starting point.
 #
+# `scripts/publish.sh --compose` prints this same file with the image line resolved to the commit it
+# just pushed, which is the version to paste if you want the stack pinned rather than floating.
+#
 # Settings arrive as environment variables and nginx reads them once, at start -- so a changed
 # UPSTREAM_URL or MODEL is a redeploy, not a rebuild.
 
 services:
   radiance-studio:
-    image: ${IMAGE:-radiance-studio:latest}
+    # Published by scripts/publish.sh. :latest floats with whatever was pushed last; pin the tag to
+    # a commit sha -- `scripts/publish.sh --compose` -- and a redeploy is a decision you made. A
+    # public package needs no registry credentials; a private one wants `docker login ghcr.io` on
+    # the host Komodo deploys to, or a Registry provider on the stack.
+    image: ${IMAGE:-ghcr.io/apfrancis1992/radiance-studio:latest}
     container_name: radiance-studio
     restart: unless-stopped
     init: true

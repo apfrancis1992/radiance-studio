@@ -57,20 +57,34 @@ nginx/default.conf.template   the server; envsubst'd by the container's entrypoi
 deploy/stack.yml              the Komodo stack (a plain compose file too)
 deploy/env.example            every setting, with what it is for
 deploy/llama-swap.yaml        the model entry to paste into llama-swap's config
+scripts/publish.sh            build, push to ghcr.io, and print the stack to paste
+scripts/check-stack.sh        what Komodo would be given, checked before it is given
+scripts/build.sh              a local tag, for changing the page
 dev/                        no GPU needed: mock-upstream.py, run.sh, smoke.mjs, check-page.mjs, shot.mjs
 Dockerfile                  nginx plus those files
 ```
 
 ## Run it
 
-### 1. The image
+### 1. Publish the image
 
 ```sh
-scripts/build.sh                     # radiance-studio:<commit>, also tagged :latest
-scripts/build.sh ghcr.io/you/radiance-studio:main
+gh auth refresh-token -s write:packages    # once, to give the gh CLI permission for packages
+scripts/publish.sh                         # -> ghcr.io/apfrancis1992/radiance-studio:<sha> and :latest
 ```
 
-Nothing is compiled, so it builds in a second and the image is nginx plus 60 KB of files.
+The token is piped to `docker login`, not written into a file. Nothing is compiled, so the build is
+a second and the image is nginx plus 60 KB of files.
+
+The first push creates the package **private**, which ghcr does not let you decide at push time;
+`publish.sh` flips it with the packages API and, when the token cannot, prints where the switch is.
+It then checks the thing that matters -- an anonymous token exchange and a manifest fetch, the same
+two calls a host with no credentials makes -- so "public" is measured rather than assumed. With a
+private package, `docker login ghcr.io` on the host Komodo deploys to (or a Registry provider on
+the stack) is what makes the pull work.
+
+For a change to the page while it is being written, `scripts/build.sh` tags a local image and
+`dev/run.sh` serves it.
 
 ### 2. llama-swap
 
@@ -80,8 +94,13 @@ a response's first byte (which, unstreamed, is the whole render).
 
 ### 3. Komodo
 
-*Stacks → New Stack*, paste `deploy/stack.yml`, and put `deploy/env.example`'s values in the stack's
-environment (or use it as an env file). Deploy.
+*Stacks → New Stack*, paste the output of `scripts/publish.sh --compose` -- `deploy/stack.yml` with
+the image line pinned to the commit it just pushed -- and put `deploy/env.example`'s values in the
+stack's environment (or use it as an env file). Deploy.
+
+Pinned rather than floating on purpose: with `:latest`, Komodo's *Poll for Updates* / *Auto Update*
+pulls whatever was pushed last and redeploys, which is a fine thing to want for a page and a poor
+thing to discover in the middle of a session. Raise the tag to a new sha when you want it.
 
 The container shares the host's network, as radiance's own containers do, so the port in `PORT` is
 the port on the host and `UPSTREAM_URL` can be the host's own loopback. Komodo's healthcheck reads
@@ -97,16 +116,23 @@ dev/run.sh                    # builds, starts dev/mock-upstream.py, serves http
 npm install                   # puppeteer-core, dev-only
 node dev/check-page.mjs       # every id app.js asks for exists, every import resolves
 node dev/smoke.mjs            # 18 checks in a real browser: form → SSE → wav → IndexedDB → reload
+sh scripts/check-stack.sh     # the stack, the template's variables, and the pinned image line
 node dev/shot.mjs             # docs/screenshot.png
 ```
 
 `dev/mock-upstream.py` answers the same four routes with a synthesised chord in the same shapes, so
-a change can be driven end to end with no cards in the loop.
+a change can be driven end to end with no cards in the loop. CI (`.woodpecker.yml`) runs the checks
+that need no browser: the module syntax, the template rendered with the image's own defaults and
+tested by nginx itself, and `scripts/check-stack.sh`.
 
 ## Settings
 
+The image tag is compose's variable; the rest arrive in the container's environment and nginx
+substitutes them once, at start.
+
 | variable | default | what it is |
 |---|---|---|
+| `IMAGE` | `ghcr.io/apfrancis1992/radiance-studio:latest` | which image to run; `scripts/publish.sh --compose` prints the stack with this pinned to a commit sha |
 | `PORT` | `8090` | the port, on the host |
 | `UPSTREAM_URL` | `http://127.0.0.1:8080` | llama-swap. A bridge network wants the container name |
 | `UPSTREAM_API_KEY` | *(empty)* | llama-swap's `apikey:`, sent as `Authorization: Bearer …`; empty sends no header. Never reaches the browser |
